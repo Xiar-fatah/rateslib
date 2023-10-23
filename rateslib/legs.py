@@ -32,11 +32,12 @@ from rateslib import defaults
 from rateslib.default import NoInput
 from rateslib.calendars import add_tenor
 from rateslib.scheduling import Schedule
-from rateslib.curves import Curve, IndexCurve
+from rateslib.curves import Curve, IndexCurve, Volatility
 from rateslib.periods import (
     IndexFixedPeriod,
     FixedPeriod,
     FloatPeriod,
+    OptionletPeriod,
     Cashflow,
     IndexCashflow,
     IndexMixin,
@@ -628,6 +629,190 @@ class FixedLeg(BaseLeg, FixedLegMixin):
 # Licence: Creative Commons - Attribution-NonCommercial-NoDerivatives 4.0 International
 # Commercial use of this code, and/or copying and redistribution is prohibited.
 # Contact rateslib at gmail.com if this code is observed outside its intended sphere.
+
+
+class OptionletLegMixin:
+    """
+    Add the functionality to add and retrieve ``float_spread`` on
+    :class:`~rateslib.periods.FloatPeriod` s and a
+    :meth:`~rateslib.periods.FloatPeriod.fixings_table`.
+    """
+
+    def _set_fixings(
+        self,
+        fixings,
+    ):
+        """
+        Re-organises the fixings input to list structure for each period.
+        Requires a ``schedule`` object and ``float_args``.
+        """
+        if fixings is NoInput.blank:
+            fixings = []
+        elif isinstance(fixings, Series):
+            last_fixing = fixings.index[-1]
+            if self.fixing_method in ["rfr_payment_delay", "rfr_lockout"]:
+                adj_days = 0
+            else:
+                # fixing_method in ["rfr_lookback", "rfr_observation_shift", "ibor"]:
+                adj_days = self.method_param
+            first_required_day = [
+                add_tenor(
+                    self.schedule.aschedule[i],
+                    f"-{adj_days}B",
+                    None,
+                    self.schedule.calendar,
+                )
+                for i in range(self.schedule.n_periods)
+            ]
+            fixings = [fixings if last_fixing >= day else NoInput(0) for day in first_required_day]
+        elif not isinstance(fixings, list):
+            fixings = [fixings]
+
+        self.fixings = fixings + [NoInput(0)] * (self.schedule.n_periods - len(fixings))
+
+    @property
+    def float_spread(self):
+        """
+        float or NoInput : If set will also set the ``float_spread`` of contained
+            :class:`~rateslib.periods.FloatPeriod` s.
+        """
+        return self._float_spread
+
+    @float_spread.setter
+    def float_spread(self, value):
+        self._float_spread = value
+        if value is NoInput(0):
+            _ = 0.0
+        else:
+            _ = value
+        for period in self.periods:
+            if isinstance(period, OptionletPeriod):
+                period.float_spread = _
+
+    def _fixings_table(self, *args, **kwargs):
+        """
+        Return a DataFrame of fixing exposures on a :class:`~rateslib.legs.FloatLeg`.
+
+        See :meth:`~rateslib.periods.FloatPeriod.fixings_table` for arguments.
+
+        Returns
+        -------
+        DataFrame
+        """
+        df, _ = None, 0
+        while df is None:
+            if type(self.periods[_]) is OptionletPeriod:
+                df = self.periods[_].fixings_table(*args, **kwargs)
+            _ += 1
+
+        n = len(self.periods)
+        for _ in range(_, n):
+            if type(self.periods[_]) is OptionletPeriod:
+                df = pd.concat([df, self.periods[_].fixings_table(*args, **kwargs)])
+        return df
+
+    def _regular_period(
+        self,
+        start: datetime,
+        end: datetime,
+        payment: datetime,
+        notional: float,
+        stub: bool,
+        iterator: int,
+    ):
+        return OptionletPeriod(
+            float_spread=self.float_spread,
+            start=start,
+            end=end,
+            payment=payment,
+            frequency=self.schedule.frequency,
+            notional=notional,
+            currency=self.currency,
+            convention=self.convention,
+            termination=self.schedule.termination,
+            stub=stub,
+            roll=self.schedule.roll,
+            calendar=self.schedule.calendar,
+            fixings=self.fixings[iterator],
+            fixing_method=self.fixing_method,
+            method_param=self.method_param,
+            spread_compound_method=self.spread_compound_method,
+            cap_or_floor=self._cap_or_floor,
+            strike=self._strike,
+            volatility=self._volatility,
+            model=self._model
+        )
+
+
+class OptionLeg(BaseLeg, OptionletLegMixin):
+    def __init__(
+        self,
+        *args,
+        cap_or_floor: [str, NoInput] = NoInput(0),
+        strike: [float, list, NoInput] = NoInput(0),
+        volatility: Union[Volatility, NoInput] = NoInput(0),
+        model: Union[str, NoInput] = NoInput(0),
+        float_spread: Union[float, NoInput] = NoInput(0),
+        fixings: Union[float, list, Series, NoInput] = NoInput(0),
+        fixing_method: Union[str, NoInput] = NoInput(0),
+        method_param: Union[int, NoInput] = NoInput(0),
+        spread_compound_method: Union[str, NoInput] = NoInput(0),
+        **kwargs,
+    ):
+        self._cap_or_floor = cap_or_floor
+        self._strike = strike
+        self._volatility = volatility
+        self._model = model
+        self._float_spread = float_spread
+        (
+            self.fixing_method,
+            self.method_param,
+            self.spread_compound_method,
+        ) = _validate_float_args(fixing_method, method_param, spread_compound_method)
+
+        self._delay_set_periods = True  # do this to set fixings first
+        super().__init__(*args, **kwargs)
+        self._set_fixings(fixings)
+        self._set_periods()
+
+    def analytic_delta(self, *args, **kwargs):
+        """
+        Return the analytic delta of the *FloatLeg* via summing all periods.
+
+        For arguments see
+        :meth:`BasePeriod.analytic_delta()<rateslib.periods.BasePeriod.analytic_delta>`.
+        """
+        return super().analytic_delta(*args, **kwargs)
+
+    def cashflows(self, *args, **kwargs) -> DataFrame:
+        """
+        Return the properties of the *FloatLeg* used in calculating cashflows.
+
+        For arguments see
+        :meth:`BasePeriod.cashflows()<rateslib.periods.BasePeriod.cashflows>`.
+        """
+        return super().cashflows(*args, **kwargs)
+
+    def npv(self, *args, **kwargs):
+        """
+        Return the NPV of the *FloatLeg* via summing all periods.
+
+        For arguments see
+        :meth:`BasePeriod.npv()<rateslib.periods.BasePeriod.npv>`.
+        """
+        return super().npv(*args, **kwargs)
+
+    def fixings_table(self, *args, **kwargs) -> DataFrame:
+        """
+        Return a DataFrame of fixing exposures on a :class:`~rateslib.legs.FloatLeg`.
+
+        For arguments see
+        :meth:`FloatPeriod.fixings_table()<rateslib.periods.FloatPeriod.fixings_table>`.
+        """
+        return super()._fixings_table(*args, **kwargs)
+
+    def _set_periods(self) -> None:
+        return super()._set_periods()
 
 
 class FloatLegMixin:

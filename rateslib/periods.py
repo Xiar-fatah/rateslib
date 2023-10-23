@@ -25,14 +25,14 @@ import warnings
 from math import comb, log
 
 import numpy as np
-
+from scipy.stats import norm
 # from pandas.tseries.offsets import CustomBusinessDay
 from pandas import DataFrame, date_range, Series, NA, isna, notna
 
 from rateslib import defaults
 from rateslib.default import NoInput
 from rateslib.calendars import add_tenor, dcf, _get_eom, _is_holiday, CalInput
-from rateslib.curves import Curve, LineCurve, IndexCurve, average_rate, CompositeCurve, index_left
+from rateslib.curves import Curve, LineCurve, IndexCurve, average_rate, CompositeCurve, index_left, Volatility
 from rateslib.dual import Dual, Dual2, DualTypes
 from rateslib.fx import FXForwards, FXRates
 
@@ -1691,6 +1691,137 @@ class FloatPeriod(BasePeriod):
             a, b = 0.0, Nvd * drdz
 
         return a, b
+
+
+class OptionletPeriod(FloatPeriod):
+    """
+    I want to replace cashflow, npv, cashflows and analytic_delta
+    """
+    def __init__(
+        self,
+        *args,
+        cap_or_floor: Union[str, NoInput] = NoInput(0),
+        float_spread: Union[float, NoInput] = NoInput(0),
+        fixings: Union[float, list, Series, NoInput] = NoInput(0),
+        fixing_method: Union[str, NoInput] = NoInput(0),
+        method_param: Union[int, NoInput] = NoInput(0),
+        spread_compound_method: Union[str, NoInput] = NoInput(0),
+        strike: Union[float, list, NoInput] = NoInput(0),
+        volatility: Union[DataFrame, dict, NoInput] = NoInput(0),
+        model: Union[str, NoInput] = NoInput(0),
+        **kwargs,
+    ):
+        self.float_spread = 0.0 if float_spread is NoInput.blank else float_spread
+
+        (
+            self.fixing_method,
+            self.method_param,
+            self.spread_compound_method,
+        ) = _validate_float_args(fixing_method, method_param, spread_compound_method)
+        self.cap_or_floor = cap_or_floor
+        self.fixings = fixings
+        if isinstance(self.fixings, list) and self.fixing_method == "ibor":
+            raise ValueError("`fixings` cannot be supplied as list, under 'ibor' `fixing_method`.")
+
+        super().__init__(*args, **kwargs)
+        self._strike = strike
+        self._volatility = volatility
+        self._model = model
+
+    def analytic_delta(self):
+        raise NotImplementedError
+
+    def _rfr_rate_from_df_curve(self, curve: Curve):
+        return super()._rfr_rate_from_df_curve(curve)
+
+    def rate(self, curve: Union[Curve, LineCurve]):
+        """
+        Calculating the floating rate for the period.
+
+        Parameters
+        ----------
+        curve : Curve, LineCurve
+            The forecasting curve object.
+
+        Returns
+        -------
+        float, Dual, Dual2
+
+        Examples
+        --------
+        .. ipython:: python
+
+           period.rate(curve)
+        """
+        return super().rate(curve)
+
+    def cashflow(self, curve: Union[Curve, LineCurve]):
+        return super().cashflow(curve)
+
+    def cashflows(
+        self,
+        curve: Union[Curve, NoInput] = NoInput(0),
+        disc_curve: Union[Curve, NoInput] = NoInput(0),
+        fx: Union[float, FXRates, FXForwards, NoInput] = NoInput(0),
+        base: Union[str, NoInput] = NoInput(0),
+    ):
+        """
+        Return the cashflows of the *FloatPeriod*.
+        See
+        :meth:`BasePeriod.cashflows()<rateslib.periods.BasePeriod.cashflows>`
+        """
+        fx, base = _get_fx_and_base(self.currency, fx, base)
+        disc_curve_: Union[Curve, NoInput] = _disc_maybe_from_curve(curve, disc_curve)
+
+        if (curve is not NoInput.blank) and (self._volatility is not NoInput.blank):
+            cashflow = float(self.cashflow(curve))
+            rate = float(100 * cashflow / (-self.notional * self.dcf))
+            npv = float(self.npv(curve, self._volatility, disc_curve_, self._model))
+            npv_fx = npv * float(fx)
+            volatility, _ = self._volatility.volatility(self.start, self._strike)
+        else:
+            cashflow, rate, npv, npv_fx, volatility = None, None, None, None, None
+
+        return {
+            defaults.headers["type"]: self.cap_or_floor,
+            defaults.headers["stub_type"]: "Stub" if self.stub else "Regular",
+            defaults.headers["currency"]: self.currency.upper(),
+            defaults.headers["a_acc_start"]: self.start,
+            defaults.headers["a_acc_end"]: self.end,
+            defaults.headers["payment"]: self.payment,
+            defaults.headers["convention"]: self.convention,
+            defaults.headers["dcf"]: self.dcf,
+            defaults.headers["notional"]: float(self.notional),
+            defaults.headers["rate"]: rate,
+            defaults.headers["strike"]: self._strike*100,
+            defaults.headers["volatility"]: volatility,
+            defaults.headers["payoff"]: self.notional * self.dcf * (rate/100 - self._strike) if rate/100 > self._strike else 0,
+            defaults.headers["npv"]: npv,
+            defaults.headers["fx"]: float(fx),
+            defaults.headers["npv_fx"]: npv_fx,
+        }
+
+    def npv(self,
+            curve: Union[Curve, LineCurve],
+            vol_surface: Union[Volatility, NoInput],
+            disc_curve: Union[Curve, NoInput],
+            model : Union[str, NoInput]
+            ):
+        if (curve is None) or (vol_surface is None):
+            return None
+        else:
+            df = _disc_maybe_from_curve(curve, disc_curve)
+            rate = None if curve is None else self.rate(curve)/100
+            _, vol_time = vol_surface.volatility(self.start, self._strike)
+            sign = 1 if self.cap_or_floor == "cap" else -1
+            match model:
+                case "log-normal":
+                    d_1 = np.log(rate/self._strike) / vol_time + 0.5 * vol_time
+                    d_2 = d_1 - vol_time
+                    _ = self.notional * df[self.payment] * self.dcf * (rate * norm.cdf(sign * d_1) - self._strike * norm.cdf(sign * d_2))
+                    return _
+                case _:
+                    raise ValueError(f"Model not supported, received: {model}.")
 
 
 class Cashflow:

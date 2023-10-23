@@ -134,6 +134,7 @@ class Defaults:
         "FloatRateNote": 0,
         "Bill": 0,
         "FRA": 0,
+        "CapFloor": 0,
     }
     fixing_method = "rfr_payment_delay"
     fixing_method_param = {
@@ -206,6 +207,9 @@ class Defaults:
         "index_ratio": "Index Ratio",
         "index_base": "Index Base",
         "collateral": "Collateral",
+        "payoff": "Payoff",
+        "strike": "Strike",
+        "volatility": "Volatility",
     }
 
     # Licence: Creative Commons - Attribution-NonCommercial-NoDerivatives 4.0 International

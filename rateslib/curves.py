@@ -7,11 +7,12 @@
 """
 
 from __future__ import annotations
-
+from abc import abstractmethod
 from datetime import datetime, timedelta
-from typing import Optional, Union, Callable, Any
+from typing import Optional, Union, Callable, Any, List
 from pandas.tseries.offsets import CustomBusinessDay
 from pandas.tseries.holiday import Holiday
+from pandas import DataFrame
 from uuid import uuid4
 import numpy as np
 import warnings
@@ -28,6 +29,7 @@ from rateslib.calendars import (
     dcf,
     CalInput,
     _DCF1d,
+    _DCF
 )
 
 from typing import TYPE_CHECKING
@@ -2805,6 +2807,79 @@ def index_left(
 #         return left_count
 #     else:
 #         return index_left_exhaustive(list_input[1:], value, left_count + 1)
+
+class Volatility:
+    def __init__(
+        self,
+        valuation_date: datetime,
+        volatility_surface: Union[DataFrame, dict, float],
+        convention: str = "ACT360",
+    ):
+        if not isinstance(valuation_date, datetime):
+            raise ValueError(
+                f"valuation_date must be a datetime object, received {valuation_date}"
+            )
+        else:
+            self._valuation_date = valuation_date
+        self._volatility_surface = volatility_surface
+        self._convention = convention
+
+    @property
+    def volatility_surface(self) -> Union[DataFrame, float]:
+        return self._volatility_surface
+
+    @abstractmethod
+    def time_from_reference(
+        valuation_date: datetime, option_time: datetime, convention: str = "ACT360"
+    ) -> float:
+        if (convention not in _DCF):
+            raise ValueError(f"Convention {convention} is not supported.")
+        return _DCF[convention](valuation_date, option_time)
+
+    def volatility(
+        self,
+        option_date: Union[datetime, List[datetime]],
+        strike: Union[float, List[float]],
+        extrapolate: bool = False,
+    ) -> float:
+        def _get_volatility(
+            option_date: datetime, strike: float, extrapolate: bool = False
+        ) -> float:
+            if not isinstance(option_date, datetime):
+                raise ValueError(
+                    f"option_date must be a datetime object, received {option_date}"
+                )
+            elif self._valuation_date > option_date:
+                return 0.0
+            elif isinstance(self._volatility_surface, float):
+                t = Volatility.time_from_reference(
+                    self._valuation_date, option_date, self._convention
+                )
+
+                return self._volatility_surface, np.sqrt(t * self._volatility_surface * self._volatility_surface)
+            elif not isinstance(strike, float):
+                raise ValueError(f"strike must be a float, received {strike}")
+            else:
+                raise NotImplementedError
+
+        if (isinstance(option_date, datetime)) and (isinstance(strike, float)):
+            return _get_volatility(option_date, strike, extrapolate)
+        elif isinstance(option_date, list) and isinstance(strike, float):
+            return [_get_volatility(d, strike, extrapolate) for d in option_date]
+        elif isinstance(option_date, list) and isinstance(strike, list):
+            if len(option_date) != len(strike):
+                raise ValueError(
+                    f"option_date and strike must have the same length, received {len(option_date)} and {len(strike)}"
+                )
+            else:
+                return [
+                    _get_volatility(d, s, extrapolate)
+                    for d, s in zip(option_date, strike)
+                ]
+        else:
+            raise ValueError(
+                "option_date and strike must be either datetime or list of datetime and float."
+            )
 
 
 # Licence: Creative Commons - Attribution-NonCommercial-NoDerivatives 4.0 International

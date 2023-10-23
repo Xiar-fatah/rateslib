@@ -6,7 +6,7 @@
    :suppress:
 
    from rateslib.instruments import *
-   from rateslib.curves import Curve
+   from rateslib.curves import Curve, Volatility
    from datetime import datetime as dt
    from pandas import Series, date_range, option_context
    curve = Curve(
@@ -39,7 +39,7 @@ from rateslib import defaults
 from rateslib.default import NoInput
 from rateslib.calendars import add_tenor, get_calendar, dcf
 
-from rateslib.curves import Curve, index_left, LineCurve, CompositeCurve, IndexCurve
+from rateslib.curves import Curve, index_left, LineCurve, CompositeCurve, IndexCurve, Volatility
 from rateslib.solver import Solver
 from rateslib.periods import (
     Cashflow,
@@ -58,6 +58,7 @@ from rateslib.legs import (
     ZeroFixedLeg,
     ZeroIndexLeg,
     IndexFixedLeg,
+    OptionLeg
 )
 from rateslib.dual import Dual, Dual2, DualTypes
 from rateslib.fx import FXForwards, FXRates, forward_fx
@@ -4705,6 +4706,163 @@ class BaseDerivative(Sensitivities, BaseMixin, metaclass=ABCMeta):
         For arguments see :meth:`Sensitivities.gamma()<rateslib.instruments.Sensitivities.gamma>`.
         """
         return super().gamma(*args, **kwargs)
+
+
+class CapFloor(BaseDerivative):
+    """
+    Create an interest rate cap or floor composed of an :class:`~rateslib.legs.OptionLeg`.
+
+    Parameters
+    ----------
+    args : dict
+        Required positional args to :class:`BaseDerivative`.
+    strike : float or list
+        The strike rate of the cap or floor. If a list, must be the same length as the
+        number of periods in the schedule.
+    volatility : float or Volatility
+        The volatility of the cap or floor.
+    cap_or_floor : str
+        The type of cap or floor, either "cap" or "floor".
+    model : str
+        The model to use for pricing the cap or floor. Currently only "log-normal"
+        is implemented.
+    fixed_rate : float or None
+        The fixed rate applied to the :class:`~rateslib.legs.FixedLeg`. If `None`
+        will be set to mid-market when curves are provided.
+    leg2_float_spread : float, optional
+        The spread applied to the :class:`~rateslib.legs.FloatLeg`. Can be set to
+        `None` and designated
+        later, perhaps after a mid-market spread for all periods has been calculated.
+    leg2_spread_compound_method : str, optional
+        The method to use for adding a floating spread to compounded rates. Available
+        options are `{"none_simple", "isda_compounding", "isda_flat_compounding"}`.
+    leg2_fixings : float, list, or Series optional
+        If a float scalar, will be applied as the determined fixing for the first
+        period. If a list of *n* fixings will be used as the fixings for the first *n*
+        periods. If any sublist of length *m* is given, is used as the first *m* RFR
+        fixings for that :class:`~rateslib.periods.FloatPeriod`. If a datetime
+        indexed ``Series`` will use the fixings that are available in that object,
+        and derive the rest from the ``curve``.
+    leg2_fixing_method : str, optional
+        The method by which floating rates are determined, set by default. See notes.
+    leg2_method_param : int, optional
+        A parameter that is used for the various ``fixing_method`` s. See notes.
+    kwargs : dict
+        Required keyword arguments to :class:`BaseDerivative`.
+
+    Examples
+    --------
+    Construct the discounting and forecasting curve together with
+    the constant volatility surface to price the cap. Using :meth:`~rateslib.curves.Volatility`
+
+    .. ipython:: python
+
+        vol = Volatility(rl.dt(2022, 1, 1), 0.5, "ACT365F")
+        usd = Curve(
+           nodes={
+               dt(2022, 1, 1): 1.0,
+               dt(2023, 1, 1): 0.965,
+               dt(2024, 1, 1): 0.94
+           },
+           id="usd"
+        )
+
+    Create the interest rate cap.
+
+    .. ipython:: python
+
+        cap = CapFloor(
+            cap_or_floor='cap',
+            strike=0.025,
+            volatility=vol,
+            model="log-normal",
+            effective=rl.dt(2022, 1, 1),
+            termination="1Y",
+            frequency="Q",
+            calendar="stk",
+            currency="usd",
+            convention="Act360",
+            notional=1e6,
+            curves=["usd"],
+        )
+        cap.cashflows(curves=usd)
+    """
+    _fixed_rate_mixin = True
+    _leg2_float_spread_mixin = True
+
+    def __init__(
+        self,
+        *args,
+        strike: Union[float, list, NoInput] = NoInput(0),
+        volatility: Union[Volatility, NoInput] = NoInput(0),
+        cap_or_floor: Union[str, NoInput] = NoInput(0),
+        model: Union[str, NoInput] = NoInput(0),
+        leg2_float_spread: Union[float, NoInput] = NoInput(0),
+        leg2_spread_compound_method: Union[str, NoInput] = NoInput(0),
+        leg2_fixings: Union[float, list, Series, NoInput] = NoInput(0),
+        leg2_fixing_method: Union[str, NoInput] = NoInput(0),
+        leg2_method_param: Union[int, NoInput] = NoInput(0),
+        **kwargs,
+    ):
+
+        super().__init__(*args, **kwargs)
+        user_kwargs = dict(
+            leg2_float_spread=leg2_float_spread,
+            leg2_spread_compound_method=leg2_spread_compound_method,
+            leg2_fixings=leg2_fixings,
+            leg2_fixing_method=leg2_fixing_method,
+            leg2_method_param=leg2_method_param,
+        )
+        self.kwargs = _update_not_noinput(self.kwargs, user_kwargs)
+
+        if not isinstance(cap_or_floor, str):
+            raise ValueError(f"cap_or_floor must be a string, received: {cap_or_floor}")
+        elif cap_or_floor not in ['cap', 'floor']:
+            raise ValueError(f"cap_or_floor must be either ['cap', 'floor'], received: {cap_or_floor}")
+        else:
+            self.cap_or_floor = cap_or_floor.lower()
+        self.strike = strike
+        self.volatility = volatility
+        self._leg2_float_spread = leg2_float_spread
+        self.model = model
+        self.leg2 = OptionLeg(
+            cap_or_floor=self.cap_or_floor,
+            strike=strike,
+            volatility=volatility,
+            model=model,
+            **_get(self.kwargs, leg=2)
+            )
+
+    def _set_pricing_mid(
+        self,
+        curves: Union[Curve, str, list, NoInput] = NoInput(0),
+        solver: Union[Solver, NoInput] = NoInput(0),
+    ):
+        pass
+
+    def cashflows(
+        self,
+        curves: Union[Curve, str, list, NoInput] = NoInput(0),
+        solver: Union[Solver, NoInput] = NoInput(0),
+        fx: Union[FXForwards, NoInput] = NoInput(0),
+        base: Union[str, NoInput] = NoInput(0),
+    ) -> DataFrame:
+        curves, _, _ = _get_curves_fx_and_base_maybe_from_solver(
+            self.curves, solver, curves, fx, base, self.leg2.currency
+        )
+        return self.leg2.cashflows(curves[0])
+
+    def npv(
+        self,
+        curves: Union[Curve, str, list, NoInput] = NoInput(0),
+        solver: Union[Solver, NoInput] = NoInput(0),
+        fx: Union[float, FXRates, FXForwards, NoInput] = NoInput(0),
+        base: Union[str, NoInput] = NoInput(0),
+    ):
+        """
+        Return the NPV of the cap or floor by summing up the optionlets.
+        """
+        raise NotImplementedError
 
 
 class IRS(BaseDerivative):

@@ -26,11 +26,12 @@ from rateslib.instruments import (
     Portfolio,
     Spread,
     Fly,
+    CapFloor,
     _get_curves_fx_and_base_maybe_from_solver,
 )
 from rateslib.dual import Dual, Dual2
 from rateslib.calendars import dcf
-from rateslib.curves import Curve, IndexCurve, LineCurve
+from rateslib.curves import Curve, IndexCurve, LineCurve, Volatility
 from rateslib.fx import FXRates, FXForwards
 from rateslib.solver import Solver
 
@@ -618,6 +619,73 @@ class TestNullPricing:
         priced_delta = inst.delta(solver=solver, fx=fxf)
 
         assert_frame_equal(unpriced_delta, priced_delta)
+
+
+class TestCapFloor:
+    def test_volatility_raises(self):
+        vol = Volatility(dt(2022, 1, 1), 0.5, "ACT365F")
+        with pytest.raises(ValueError, match="option_date and strike must be either datetime or list of datetime and float"):
+            vol.volatility(dt(2022, 1, 1), "test", "ACT365F")
+        with pytest.raises(ValueError, match="option_date and strike must be either datetime or list of datetime and float"):
+            vol.volatility("test", 0.5, "ACT365F")
+        with pytest.raises(ValueError, match="option_date and strike must be either datetime or list of datetime and float"):
+            vol.volatility((2022, 1, 1), "test", "ACT365F")
+
+    def test_capfloor_cashflow(self):
+        vol = Volatility(dt(2022, 1, 1), 0.5, "ACT365F")
+        test_curve = Curve(
+            nodes={
+                dt(2022, 1, 1): 1.0,
+                dt(2023, 1, 1): 0.965,
+                dt(2024, 1, 1): 0.94
+            },
+            id="test_curve",
+        )
+        floor = CapFloor(
+            cap_or_floor='floor',
+            strike=0.025,
+            volatility=vol,
+            model="log-normal",
+            effective=dt(2022, 1, 1),
+            termination="1Y",
+            frequency="Q",
+            calendar="stk",
+            currency="usd",
+            convention="Act360",
+            notional=1e6,
+            curves=["test_curve"],
+        )
+        cap = CapFloor(
+            cap_or_floor='cap',
+            strike=0.025,
+            volatility=vol,
+            model="log-normal",
+            effective=dt(2022, 1, 1),
+            termination="1Y",
+            frequency="Q",
+            calendar="stk",
+            currency="usd",
+            convention="Act360",
+            notional=1e6,
+            curves=["test_curve"],
+        )
+        cap_cashflows = cap.cashflows(curves=test_curve)
+        floor_cashflows = floor.cashflows(curves=test_curve)
+        test_cap_cashflows = [
+            -2493.450264,
+            -2625.359083,
+            -2846.309041,
+            -2866.465047
+            ]
+        test_floor_cashflows = [
+            1.716903729330568e-19,
+            68.42106932735855,
+            227.88372716804327,
+            380.2358334426418
+        ]
+        for i in range(len(cap_cashflows)):
+            assert abs(cap_cashflows.NPV[i] - test_cap_cashflows[i]) < 1e-6
+            assert abs(floor_cashflows.NPV[i] - test_floor_cashflows[i]) < 1e-6
 
 
 class TestIRS:

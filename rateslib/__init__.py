@@ -65,6 +65,7 @@ from rateslib.curves import (
     IndexCurve,
     CompositeCurve,
     ProxyCurve,
+    Volatility
 )
 
 from rateslib.fx import (
@@ -113,6 +114,7 @@ from rateslib.instruments import (
     XCS,
     Spread,
     Fly,
+    CapFloor,
     Portfolio,
 )
 
@@ -160,6 +162,7 @@ __all__ = [
     "ProxyCurve",
     "interpolate",
     "index_left",
+    "Volatility",
     # solver.py
     "Solver",
     # fx.py
@@ -200,5 +203,6 @@ __all__ = [
     "XCS",
     "Spread",
     "Fly",
+    "CapFloor",
     "Portfolio",
 ]
